@@ -2,15 +2,31 @@
 
 import type React from "react"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Upload, FileImage, Brain, CheckCircle, AlertCircle, ArrowLeft, Pill, Calendar, Clock } from "lucide-react"
+import {
+  Upload,
+  FileImage,
+  Brain,
+  CheckCircle,
+  AlertCircle,
+  ArrowLeft,
+  Pill,
+  Calendar,
+  Clock,
+  Shield,
+  Activity,
+} from "lucide-react"
 import { useToast } from "@/components/ui/use-toast"
 import { Progress } from "@/components/ui/progress"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
+import { supabase } from "@/lib/supabase"
+import { db } from "@/lib/database"
+import type { Scan } from "@/lib/supabase"
 
 export default function UploadPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -18,7 +34,27 @@ export default function UploadPage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisResult, setAnalysisResult] = useState<any>(null)
   const [progress, setProgress] = useState(0)
+  const [currentScan, setCurrentScan] = useState<Scan | null>(null)
+  const [user, setUser] = useState<any>(null)
+  const [imagePreview, setImagePreview] = useState<string | null>(null)
   const { toast } = useToast()
+  const router = useRouter()
+
+  useEffect(() => {
+    const getUser = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+
+      if (!user) {
+        router.push("/auth/signin")
+      } else {
+        setUser(user)
+      }
+    }
+
+    getUser()
+  }, [router])
 
   const handleFileSelect = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -47,6 +83,14 @@ export default function UploadPage() {
 
         setSelectedFile(file)
         setAnalysisResult(null)
+        setCurrentScan(null)
+
+        // Create image preview
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          setImagePreview(e.target?.result as string)
+        }
+        reader.readAsDataURL(file)
       }
     },
     [toast],
@@ -70,6 +114,107 @@ export default function UploadPage() {
     event.preventDefault()
   }, [])
 
+  const analyzeImage = async () => {
+    if (!selectedFile || !scanType || !user) {
+      toast({
+        title: "Missing information",
+        description: "Please select a file and scan type before analyzing.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setIsAnalyzing(true)
+    setProgress(0)
+
+    try {
+      // Upload image to storage and create thumbnail
+      const [imageUrl, thumbnailUrl] = await Promise.all([
+        db.uploadImage(selectedFile),
+        db.createThumbnail(selectedFile),
+      ])
+
+      if (!imageUrl) {
+        throw new Error("Failed to upload image")
+      }
+
+      // Create scan record in database
+      const newScan = await db.createScan({
+        user_id: user.id,
+        name: selectedFile.name.replace(/\.[^/.]+$/, "") + ` - ${getScanTypeLabel(scanType)}`,
+        type: getScanTypeLabel(scanType),
+        file_name: selectedFile.name,
+        file_size: selectedFile.size,
+        upload_date: new Date().toISOString(),
+        status: "pending",
+        image_url: imageUrl,
+        thumbnail_url: thumbnailUrl,
+        metadata: {
+          originalFileName: selectedFile.name,
+          fileType: selectedFile.type,
+          uploadedAt: new Date().toISOString(),
+        },
+      })
+
+      if (!newScan) {
+        throw new Error("Failed to create scan record")
+      }
+
+      setCurrentScan(newScan)
+
+      // Update scan status to analyzing
+      await db.updateScan(newScan.id, { status: "analyzing" })
+
+      // Simulate AI analysis progress
+      const interval = setInterval(() => {
+        setProgress((prev) => {
+          if (prev >= 100) {
+            clearInterval(interval)
+            return 100
+          }
+          return prev + Math.random() * 15 + 5
+        })
+      }, 300)
+
+      // Simulate API call to YOLOv8 model
+      const analysisTime = Math.random() * 2000 + 3000 // 3-5 seconds
+      setTimeout(async () => {
+        clearInterval(interval)
+        setProgress(100)
+
+        // Generate mock analysis results
+        const result = generateMockAnalysis(scanType)
+        setAnalysisResult(result)
+
+        // Update scan with analysis results
+        await db.updateScan(newScan.id, {
+          status: "analyzed",
+          diagnosis: result.diagnosis,
+          confidence: result.confidence,
+          severity: result.severity,
+          findings: result.findings,
+          recommendations: result.recommendations,
+          prescription: result.prescription,
+        })
+
+        setIsAnalyzing(false)
+
+        toast({
+          title: "Analysis complete!",
+          description: "Your medical image has been successfully analyzed and saved to your account.",
+        })
+      }, analysisTime)
+    } catch (error) {
+      console.error("Failed to analyze image:", error)
+      setIsAnalyzing(false)
+      toast({
+        title: "Analysis failed",
+        description: "Failed to analyze the image. Please try again.",
+        variant: "destructive",
+      })
+    }
+  }
+
   const getScanTypeLabel = (type: string) => {
     const labels: Record<string, string> = {
       "chest-xray": "Chest X-Ray",
@@ -82,930 +227,499 @@ export default function UploadPage() {
     return labels[type] || type
   }
 
-  const analyzeImage = async () => {
-    if (!selectedFile || !scanType) {
-      toast({
-        title: "Missing information",
-        description: "Please select a file and scan type before analyzing.",
-        variant: "destructive",
-      })
-      return
+  const generateMockAnalysis = (scanType: string) => {
+    const mockResults = {
+      "chest-xray": {
+        diagnosis:
+          Math.random() > 0.7
+            ? "Bacterial Pneumonia detected in right lower lobe"
+            : Math.random() > 0.4
+              ? "Mild cardiomegaly with possible heart failure"
+              : "Normal chest X-ray findings",
+        confidence: Math.random() > 0.7 ? 89.5 : Math.random() > 0.4 ? 92.8 : 97.2,
+        findings:
+          Math.random() > 0.7
+            ? [
+                "Dense consolidation in right lower lobe consistent with bacterial pneumonia",
+                "Air bronchograms visible within the consolidation",
+                "Blunting of right costophrenic angle suggesting pleural effusion",
+                "Heart size within normal limits",
+                "No pneumothorax detected",
+              ]
+            : Math.random() > 0.4
+              ? [
+                  "Enlarged cardiac silhouette (cardiothoracic ratio 0.52)",
+                  "Pulmonary vascular congestion",
+                  "Bilateral lower lobe haziness",
+                  "No acute infiltrates",
+                  "Costophrenic angles are sharp",
+                ]
+              : [
+                  "Clear lung fields bilaterally",
+                  "Normal heart size and contour",
+                  "Sharp costophrenic angles",
+                  "No pleural effusion or pneumothorax",
+                  "Normal mediastinal contours",
+                ],
+        severity: Math.random() > 0.7 ? "moderate" : Math.random() > 0.4 ? "mild" : "normal",
+        recommendations:
+          Math.random() > 0.7
+            ? [
+                "Immediate antibiotic therapy recommended",
+                "Follow-up chest X-ray in 48-72 hours",
+                "Monitor oxygen saturation and respiratory status",
+                "Consider hospitalization if symptoms worsen",
+              ]
+            : Math.random() > 0.4
+              ? [
+                  "Echocardiogram recommended for cardiac function assessment",
+                  "Monitor blood pressure and fluid status",
+                  "Follow up with cardiologist within 1-2 weeks",
+                  "Consider diuretic therapy if indicated",
+                ]
+              : [
+                  "Continue routine preventive care",
+                  "Annual chest X-ray screening as appropriate",
+                  "Follow up with primary care physician as scheduled",
+                ],
+        prescription:
+          Math.random() > 0.7
+            ? {
+                medications: [
+                  {
+                    name: "Amoxicillin-Clavulanate (Augmentin)",
+                    dosage: "875mg/125mg",
+                    frequency: "Twice daily",
+                    duration: "7-10 days",
+                    instructions:
+                      "Take with food to minimize gastrointestinal upset. Complete full course even if symptoms improve.",
+                    timing: "Morning and evening with meals",
+                  },
+                  {
+                    name: "Acetaminophen (Tylenol)",
+                    dosage: "650mg",
+                    frequency: "Every 6 hours as needed",
+                    duration: "As needed for fever/pain",
+                    instructions: "Do not exceed 3000mg in 24 hours. Monitor liver function if used long-term.",
+                    timing: "As needed for symptoms",
+                  },
+                ],
+                lifestyle: [
+                  "Complete bed rest for first 48-72 hours",
+                  "Increase fluid intake to 8-10 glasses of water daily",
+                  "Use humidifier or steam inhalation 2-3 times daily",
+                  "Avoid smoking and secondhand smoke completely",
+                ],
+                followUp:
+                  "Return for follow-up in 48-72 hours or immediately if breathing difficulty worsens, fever persists above 101°F, or chest pain increases",
+                warnings: [
+                  "Complete the full antibiotic course even if feeling better",
+                  "Seek immediate medical attention if experiencing severe shortness of breath",
+                  "Monitor for allergic reactions to antibiotics (rash, swelling, difficulty breathing)",
+                ],
+              }
+            : {
+                medications: [],
+                lifestyle: [
+                  "Continue healthy lifestyle habits",
+                  "Regular aerobic exercise 150 minutes per week",
+                  "Maintain balanced diet rich in fruits and vegetables",
+                  "Avoid smoking and limit alcohol consumption",
+                ],
+                followUp: "Routine follow-up with primary care physician as scheduled",
+                warnings: [],
+              },
+      },
+      "brain-mri": {
+        diagnosis:
+          Math.random() > 0.6
+            ? "Small vessel ischemic changes consistent with microvascular disease"
+            : Math.random() > 0.3
+              ? "Mild cerebral atrophy consistent with age-related changes"
+              : "Normal brain MRI findings",
+        confidence: Math.random() > 0.6 ? 91.7 : Math.random() > 0.3 ? 88.4 : 96.1,
+        findings:
+          Math.random() > 0.6
+            ? [
+                "Multiple small hyperintense lesions in periventricular white matter",
+                "T2/FLAIR hyperintensities in subcortical regions",
+                "No acute infarction or hemorrhage",
+                "Ventricular system normal in size",
+                "No mass effect or midline shift",
+              ]
+            : Math.random() > 0.3
+              ? [
+                  "Mild generalized cerebral volume loss",
+                  "Prominent sulci and ventricles for age",
+                  "No focal lesions identified",
+                  "Normal gray-white matter differentiation",
+                  "No evidence of acute pathology",
+                ]
+              : [
+                  "Normal brain parenchyma",
+                  "No abnormal signal intensities",
+                  "Normal ventricular system",
+                  "No mass lesions or hemorrhage",
+                  "Intact blood-brain barrier",
+                ],
+        severity: Math.random() > 0.6 ? "mild" : Math.random() > 0.3 ? "mild" : "normal",
+        recommendations:
+          Math.random() > 0.6
+            ? [
+                "Optimize cardiovascular risk factors",
+                "Blood pressure management crucial",
+                "Consider antiplatelet therapy",
+                "Cognitive assessment recommended",
+              ]
+            : Math.random() > 0.3
+              ? [
+                  "Routine monitoring with annual follow-up",
+                  "Maintain cognitive stimulation activities",
+                  "Regular exercise and healthy diet",
+                  "Monitor for any new neurological symptoms",
+                ]
+              : ["Continue routine care", "No immediate follow-up required", "Maintain healthy lifestyle"],
+        prescription: {
+          medications: [],
+          lifestyle: [
+            "Continue healthy lifestyle habits",
+            "Regular mental stimulation and social activities",
+            "Maintain physical exercise routine",
+            "Balanced nutrition with brain-healthy foods",
+          ],
+          followUp: "Routine follow-up as needed",
+          warnings: [],
+        },
+      },
     }
 
-    setIsAnalyzing(true)
-    setProgress(0)
+    return mockResults[scanType as keyof typeof mockResults] || mockResults["chest-xray"]
+  }
 
-    // Simulate AI analysis progress
-    const interval = setInterval(() => {
-      setProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval)
-          return 100
-        }
-        return prev + Math.random() * 15 + 5
-      })
-    }, 300)
-
-    // Simulate API call to YOLOv8 model
-    const analysisTime = Math.random() * 2000 + 3000 // 3-5 seconds
-    setTimeout(() => {
-      clearInterval(interval)
-      setProgress(100)
-
-      // Mock analysis results with AI prescription
-      const mockResults = {
-        "chest-xray": {
-          diagnosis:
-            Math.random() > 0.7
-              ? "Pneumonia detected in right lower lobe"
-              : Math.random() > 0.4
-                ? "Mild cardiomegaly observed"
-                : "Normal chest X-ray",
-          confidence: Math.random() > 0.7 ? 87.3 : Math.random() > 0.4 ? 91.2 : 96.8,
-          findings:
-            Math.random() > 0.7
-              ? [
-                  "Consolidation in right lower lobe consistent with pneumonia",
-                  "Increased opacity in right lung base",
-                  "Heart size within normal limits",
-                  "No pleural effusion detected",
-                ]
-              : Math.random() > 0.4
-                ? [
-                    "Enlarged cardiac silhouette (cardiothoracic ratio >0.5)",
-                    "Clear lung fields bilaterally",
-                    "No acute pulmonary infiltrates",
-                    "Normal bone structures",
-                  ]
-                : [
-                    "Clear lung fields bilaterally",
-                    "Normal heart size and shape",
-                    "No acute bone abnormalities",
-                    "Normal mediastinal contours",
-                  ],
-          severity: Math.random() > 0.7 ? "Moderate" : Math.random() > 0.4 ? "Mild" : "Normal",
-          recommendations:
-            Math.random() > 0.7
-              ? [
-                  "Antibiotic therapy recommended",
-                  "Follow-up chest X-ray in 7-10 days",
-                  "Monitor for respiratory symptoms",
-                ]
-              : Math.random() > 0.4
-                ? [
-                    "Echocardiogram recommended for cardiac evaluation",
-                    "Monitor blood pressure regularly",
-                    "Follow up with cardiologist",
-                  ]
-                : ["Continue routine care", "Follow up as scheduled with your physician"],
-          prescription:
-            Math.random() > 0.7
-              ? {
-                  medications: [
-                    {
-                      name: "Amoxicillin-Clavulanate",
-                      dosage: "875mg/125mg",
-                      frequency: "Twice daily",
-                      duration: "7-10 days",
-                      instructions: "Take with food to reduce stomach upset",
-                      timing: "Morning and evening with meals",
-                    },
-                    {
-                      name: "Acetaminophen",
-                      dosage: "500mg",
-                      frequency: "Every 6 hours as needed",
-                      duration: "As needed for fever/pain",
-                      instructions: "Do not exceed 3000mg in 24 hours",
-                      timing: "As needed for symptoms",
-                    },
-                    {
-                      name: "Dextromethorphan",
-                      dosage: "15mg",
-                      frequency: "Every 4 hours as needed",
-                      duration: "For cough relief",
-                      instructions: "Take with plenty of water",
-                      timing: "As needed for cough",
-                    },
-                  ],
-                  lifestyle: [
-                    "Rest and adequate sleep (8+ hours daily)",
-                    "Increase fluid intake (8-10 glasses water daily)",
-                    "Avoid smoking and alcohol",
-                    "Use humidifier if available",
-                    "Avoid strenuous activities until recovery",
-                  ],
-                  followUp: "Return if symptoms worsen or no improvement in 48-72 hours",
-                  warnings: [
-                    "Complete the full course of antibiotics even if feeling better",
-                    "Seek immediate care if breathing becomes difficult",
-                    "Monitor temperature and report fever >101.5°F",
-                  ],
-                }
-              : Math.random() > 0.4
-                ? {
-                    medications: [
-                      {
-                        name: "Lisinopril",
-                        dosage: "10mg",
-                        frequency: "Once daily",
-                        duration: "Ongoing",
-                        instructions: "Take at the same time each day, preferably morning",
-                        timing: "Morning with breakfast",
-                      },
-                      {
-                        name: "Metoprolol",
-                        dosage: "25mg",
-                        frequency: "Twice daily",
-                        duration: "Ongoing",
-                        instructions: "Take with or immediately after meals",
-                        timing: "Morning and evening with meals",
-                      },
-                    ],
-                    lifestyle: [
-                      "Low sodium diet (<2300mg daily)",
-                      "Regular exercise (30 min, 5 days/week)",
-                      "Weight management if overweight",
-                      "Limit alcohol consumption",
-                      "Monitor blood pressure regularly",
-                    ],
-                    followUp: "Cardiology consultation within 2-4 weeks",
-                    warnings: [
-                      "Do not stop medications without consulting physician",
-                      "Monitor for dizziness or fatigue",
-                      "Check blood pressure regularly",
-                    ],
-                  }
-                : {
-                    medications: [],
-                    lifestyle: [
-                      "Continue healthy lifestyle habits",
-                      "Regular exercise and balanced diet",
-                      "Annual health screenings",
-                      "Avoid smoking",
-                    ],
-                    followUp: "Routine follow-up as scheduled",
-                    warnings: [],
-                  },
-        },
-        "brain-mri": {
-          diagnosis:
-            Math.random() > 0.8
-              ? "Small vessel disease detected"
-              : Math.random() > 0.5
-                ? "Mild cerebral atrophy"
-                : "Normal brain MRI",
-          confidence: Math.random() > 0.8 ? 83.7 : Math.random() > 0.5 ? 89.4 : 97.1,
-          findings:
-            Math.random() > 0.8
-              ? [
-                  "Multiple small hyperintense lesions in white matter",
-                  "Consistent with small vessel ischemic changes",
-                  "No acute infarction or hemorrhage",
-                  "Ventricular system normal",
-                ]
-              : Math.random() > 0.5
-                ? [
-                    "Mild generalized cerebral volume loss",
-                    "Enlarged ventricles and sulci",
-                    "No focal lesions identified",
-                    "Normal signal intensity in brain parenchyma",
-                  ]
-                : [
-                    "No acute intracranial abnormalities",
-                    "Normal brain parenchyma signal",
-                    "No evidence of mass lesions or hemorrhage",
-                    "Normal ventricular system",
-                  ],
-          severity: Math.random() > 0.8 ? "Mild" : Math.random() > 0.5 ? "Mild" : "Normal",
-          recommendations:
-            Math.random() > 0.8
-              ? ["Control cardiovascular risk factors", "Regular monitoring recommended", "Discuss with neurologist"]
-              : Math.random() > 0.5
-                ? [
-                    "Age-related changes, monitor progression",
-                    "Cognitive assessment if symptoms present",
-                    "Annual follow-up MRI",
-                  ]
-                : ["No immediate intervention required", "Routine follow-up as clinically indicated"],
-          prescription:
-            Math.random() > 0.8
-              ? {
-                  medications: [
-                    {
-                      name: "Aspirin",
-                      dosage: "81mg",
-                      frequency: "Once daily",
-                      duration: "Ongoing",
-                      instructions: "Take with food to prevent stomach irritation",
-                      timing: "Morning with breakfast",
-                    },
-                    {
-                      name: "Atorvastatin",
-                      dosage: "20mg",
-                      frequency: "Once daily at bedtime",
-                      duration: "Ongoing",
-                      instructions: "Avoid grapefruit juice",
-                      timing: "Bedtime",
-                    },
-                  ],
-                  lifestyle: [
-                    "Mediterranean diet rich in omega-3 fatty acids",
-                    "Regular cardiovascular exercise",
-                    "Blood pressure monitoring",
-                    "Smoking cessation if applicable",
-                    "Cognitive exercises and mental stimulation",
-                  ],
-                  followUp: "Neurology consultation within 4-6 weeks",
-                  warnings: [
-                    "Report any new neurological symptoms immediately",
-                    "Monitor for muscle pain with statin therapy",
-                    "Regular liver function tests",
-                  ],
-                }
-              : Math.random() > 0.5
-                ? {
-                    medications: [
-                      {
-                        name: "Vitamin B12",
-                        dosage: "1000mcg",
-                        frequency: "Once daily",
-                        duration: "3 months",
-                        instructions: "Take with breakfast",
-                        timing: "Morning with food",
-                      },
-                      {
-                        name: "Vitamin D3",
-                        dosage: "2000 IU",
-                        frequency: "Once daily",
-                        duration: "Ongoing",
-                        instructions: "Take with a meal containing fat",
-                        timing: "With lunch or dinner",
-                      },
-                    ],
-                    lifestyle: [
-                      "Cognitive exercises and mental stimulation",
-                      "Social engagement activities",
-                      "Regular sleep schedule (7-9 hours)",
-                      "Stress management techniques",
-                      "Regular physical exercise",
-                    ],
-                    followUp: "Annual MRI and cognitive assessment",
-                    warnings: ["Report any memory changes or confusion", "Maintain regular sleep patterns"],
-                  }
-                : {
-                    medications: [],
-                    lifestyle: [
-                      "Maintain healthy brain habits",
-                      "Regular mental and physical exercise",
-                      "Balanced nutrition",
-                      "Adequate sleep",
-                    ],
-                    followUp: "Routine follow-up as scheduled",
-                    warnings: [],
-                  },
-        },
-        "ct-scan": {
-          diagnosis:
-            Math.random() > 0.75
-              ? "Hepatic steatosis (fatty liver)"
-              : Math.random() > 0.4
-                ? "Renal cyst detected"
-                : "Normal abdominal CT scan",
-          confidence: Math.random() > 0.75 ? 92.6 : Math.random() > 0.4 ? 95.8 : 94.3,
-          findings:
-            Math.random() > 0.75
-              ? [
-                  "Diffuse low attenuation of liver parenchyma",
-                  "Liver-to-spleen attenuation ratio <1.0",
-                  "No focal hepatic lesions",
-                  "Normal pancreas, spleen, and kidneys",
-                ]
-              : Math.random() > 0.4
-                ? [
-                    "Simple cyst in left kidney measuring 2.3 cm",
-                    "Normal liver, pancreas, and spleen",
-                    "No abdominal lymphadenopathy",
-                    "Normal bowel gas pattern",
-                  ]
-                : [
-                    "Normal enhancement of all organs",
-                    "No focal lesions or masses detected",
-                    "Normal bowel wall thickness",
-                    "No free fluid or lymphadenopathy",
-                  ],
-          severity: Math.random() > 0.75 ? "Mild" : Math.random() > 0.4 ? "Benign" : "Normal",
-          recommendations:
-            Math.random() > 0.75
-              ? [
-                  "Lifestyle modifications recommended",
-                  "Weight loss and dietary changes",
-                  "Monitor liver function tests",
-                ]
-              : Math.random() > 0.4
-                ? [
-                    "Benign finding, no treatment needed",
-                    "Routine follow-up in 1-2 years",
-                    "No restrictions on activity",
-                  ]
-                : ["Results within normal limits", "Continue routine preventive care"],
-          prescription:
-            Math.random() > 0.75
-              ? {
-                  medications: [
-                    {
-                      name: "Vitamin E",
-                      dosage: "800 IU",
-                      frequency: "Once daily",
-                      duration: "6 months",
-                      instructions: "Take with a meal containing fat for better absorption",
-                      timing: "With dinner",
-                    },
-                    {
-                      name: "Omega-3 Fatty Acids",
-                      dosage: "1000mg",
-                      frequency: "Twice daily",
-                      duration: "Ongoing",
-                      instructions: "Take with meals to reduce fishy aftertaste",
-                      timing: "With breakfast and dinner",
-                    },
-                  ],
-                  lifestyle: [
-                    "Weight reduction of 5-10% if overweight",
-                    "Low-fat, low-carbohydrate diet",
-                    "Limit alcohol consumption",
-                    "Regular aerobic exercise (150 min/week)",
-                    "Avoid high-fructose corn syrup",
-                  ],
-                  followUp: "Liver function tests in 3 months, repeat CT in 6 months",
-                  warnings: ["Avoid alcohol completely", "Monitor for abdominal pain", "Regular weight monitoring"],
-                }
-              : Math.random() > 0.4
-                ? {
-                    medications: [],
-                    lifestyle: [
-                      "No dietary restrictions",
-                      "Continue normal activities",
-                      "Stay well hydrated",
-                      "Regular exercise",
-                    ],
-                    followUp: "Routine imaging in 1-2 years if asymptomatic",
-                    warnings: [],
-                  }
-                : {
-                    medications: [],
-                    lifestyle: [
-                      "Maintain healthy diet and exercise",
-                      "Regular preventive care",
-                      "Annual health screenings",
-                    ],
-                    followUp: "Routine follow-up as scheduled",
-                    warnings: [],
-                  },
-        },
-        "bone-xray": {
-          diagnosis:
-            Math.random() > 0.6
-              ? "Osteoarthritis changes detected"
-              : Math.random() > 0.3
-                ? "Hairline fracture identified"
-                : "Normal bone X-ray",
-          confidence: Math.random() > 0.6 ? 88.9 : Math.random() > 0.3 ? 94.7 : 96.2,
-          findings:
-            Math.random() > 0.6
-              ? [
-                  "Joint space narrowing in affected areas",
-                  "Osteophyte formation present",
-                  "Subchondral sclerosis noted",
-                  "No acute fractures detected",
-                ]
-              : Math.random() > 0.3
-                ? [
-                    "Subtle lucent line consistent with hairline fracture",
-                    "No displacement of bone fragments",
-                    "Soft tissue swelling present",
-                    "Normal bone density",
-                  ]
-                : [
-                    "Normal bone density and alignment",
-                    "No fractures or dislocations",
-                    "Joint spaces well preserved",
-                    "Normal soft tissue shadows",
-                  ],
-          severity: Math.random() > 0.6 ? "Mild to Moderate" : Math.random() > 0.3 ? "Mild" : "Normal",
-          recommendations:
-            Math.random() > 0.6
-              ? [
-                  "Physical therapy may be beneficial",
-                  "Anti-inflammatory medications as needed",
-                  "Weight management if applicable",
-                ]
-              : Math.random() > 0.3
-                ? ["Immobilization recommended", "Follow-up X-ray in 2-3 weeks", "Avoid weight-bearing activities"]
-                : ["No treatment required", "Continue normal activities"],
-          prescription:
-            Math.random() > 0.6
-              ? {
-                  medications: [
-                    {
-                      name: "Ibuprofen",
-                      dosage: "400mg",
-                      frequency: "Three times daily with meals",
-                      duration: "2-3 weeks",
-                      instructions: "Take with food to prevent stomach upset",
-                      timing: "With breakfast, lunch, and dinner",
-                    },
-                    {
-                      name: "Glucosamine Sulfate",
-                      dosage: "1500mg",
-                      frequency: "Once daily",
-                      duration: "3-6 months",
-                      instructions: "Take with meals for better absorption",
-                      timing: "With breakfast",
-                    },
-                    {
-                      name: "Topical Diclofenac Gel",
-                      dosage: "Apply thin layer",
-                      frequency: "3-4 times daily",
-                      duration: "As needed",
-                      instructions: "Apply to affected joint, wash hands after use",
-                      timing: "Morning, afternoon, evening, and bedtime",
-                    },
-                  ],
-                  lifestyle: [
-                    "Low-impact exercises (swimming, cycling)",
-                    "Weight management to reduce joint stress",
-                    "Hot/cold therapy for pain relief",
-                    "Ergonomic modifications at work/home",
-                    "Avoid high-impact activities",
-                  ],
-                  followUp: "Orthopedic consultation if symptoms persist beyond 6 weeks",
-                  warnings: [
-                    "Stop NSAIDs if stomach upset occurs",
-                    "Monitor for swelling or increased pain",
-                    "Avoid overuse of affected joint",
-                  ],
-                }
-              : Math.random() > 0.3
-                ? {
-                    medications: [
-                      {
-                        name: "Acetaminophen",
-                        dosage: "500mg",
-                        frequency: "Every 6 hours as needed",
-                        duration: "2-3 weeks",
-                        instructions: "Do not exceed 3000mg in 24 hours",
-                        timing: "As needed for pain",
-                      },
-                      {
-                        name: "Calcium Carbonate",
-                        dosage: "500mg",
-                        frequency: "Twice daily with meals",
-                        duration: "6-8 weeks",
-                        instructions: "Take with vitamin D for better absorption",
-                        timing: "With breakfast and dinner",
-                      },
-                    ],
-                    lifestyle: [
-                      "Immobilize affected area",
-                      "Ice application 15-20 minutes every 2-3 hours",
-                      "Elevate injured limb when possible",
-                      "Avoid weight-bearing activities",
-                      "Gentle range of motion exercises after initial healing",
-                    ],
-                    followUp: "Follow-up X-ray in 2-3 weeks to assess healing",
-                    warnings: [
-                      "Seek immediate care if numbness or tingling occurs",
-                      "Report increased pain or swelling",
-                      "Do not remove immobilization without medical approval",
-                    ],
-                  }
-                : {
-                    medications: [],
-                    lifestyle: [
-                      "Continue regular exercise",
-                      "Maintain adequate calcium and vitamin D intake",
-                      "Weight-bearing exercises for bone health",
-                    ],
-                    followUp: "Routine follow-up as scheduled",
-                    warnings: [],
-                  },
-        },
-        ultrasound: {
-          diagnosis:
-            Math.random() > 0.7
-              ? "Gallbladder polyp detected"
-              : Math.random() > 0.4
-                ? "Thyroid nodule identified"
-                : "Normal ultrasound findings",
-          confidence: Math.random() > 0.7 ? 86.4 : Math.random() > 0.4 ? 91.8 : 95.5,
-          findings:
-            Math.random() > 0.7
-              ? [
-                  "Small echogenic focus in gallbladder wall",
-                  "Measures approximately 4mm",
-                  "No gallstones or wall thickening",
-                  "Normal bile duct caliber",
-                ]
-              : Math.random() > 0.4
-                ? [
-                    "Hypoechoic nodule in thyroid gland",
-                    "Well-defined margins, measures 8mm",
-                    "Normal thyroid parenchyma elsewhere",
-                    "No cervical lymphadenopathy",
-                  ]
-                : [
-                    "Normal organ echogenicity and size",
-                    "No masses or cysts detected",
-                    "Normal vascular flow patterns",
-                    "No fluid collections",
-                  ],
-          severity: Math.random() > 0.7 ? "Benign" : Math.random() > 0.4 ? "Indeterminate" : "Normal",
-          recommendations:
-            Math.random() > 0.7
-              ? ["Annual ultrasound surveillance", "No immediate intervention needed", "Maintain healthy diet"]
-              : Math.random() > 0.4
-                ? [
-                    "Fine needle aspiration may be considered",
-                    "Thyroid function tests recommended",
-                    "Follow-up in 6 months",
-                  ]
-                : ["Continue routine screening", "No follow-up required"],
-          prescription:
-            Math.random() > 0.7
-              ? {
-                  medications: [],
-                  lifestyle: [
-                    "Low-fat diet to reduce gallbladder stress",
-                    "Maintain healthy weight",
-                    "Avoid rapid weight loss",
-                    "Increase fiber intake",
-                    "Regular meal timing",
-                  ],
-                  followUp: "Annual ultrasound surveillance",
-                  warnings: ["Report severe abdominal pain immediately", "Avoid very fatty meals"],
-                }
-              : Math.random() > 0.4
-                ? {
-                    medications: [
-                      {
-                        name: "Levothyroxine",
-                        dosage: "25mcg",
-                        frequency: "Once daily on empty stomach",
-                        duration: "As determined by TSH levels",
-                        instructions:
-                          "Take 30-60 minutes before breakfast, avoid calcium/iron supplements within 4 hours",
-                        timing: "Early morning on empty stomach",
-                      },
-                    ],
-                    lifestyle: [
-                      "Regular thyroid function monitoring",
-                      "Iodine-rich foods in moderation",
-                      "Stress management techniques",
-                      "Regular sleep schedule",
-                      "Avoid excessive soy products",
-                    ],
-                    followUp: "Endocrinology consultation and thyroid function tests in 6-8 weeks",
-                    warnings: [
-                      "Report heart palpitations or chest pain",
-                      "Monitor for changes in energy levels",
-                      "Take medication consistently at same time daily",
-                    ],
-                  }
-                : {
-                    medications: [],
-                    lifestyle: ["Continue healthy lifestyle", "Regular preventive screenings", "Balanced nutrition"],
-                    followUp: "Routine follow-up as scheduled",
-                    warnings: [],
-                  },
-        },
-        mammography: {
-          diagnosis:
-            Math.random() > 0.8
-              ? "BI-RADS 3: Probably benign finding"
-              : Math.random() > 0.5
-                ? "Dense breast tissue noted"
-                : "BI-RADS 1: Negative mammogram",
-          confidence: Math.random() > 0.8 ? 84.2 : Math.random() > 0.5 ? 93.7 : 97.9,
-          findings:
-            Math.random() > 0.8
-              ? [
-                  "Small circumscribed mass in upper outer quadrant",
-                  "Stable compared to prior imaging",
-                  "No suspicious calcifications",
-                  "Normal lymph nodes",
-                ]
-              : Math.random() > 0.5
-                ? [
-                    "Heterogeneously dense breast tissue",
-                    "May obscure small lesions",
-                    "No dominant masses or calcifications",
-                    "Symmetric breast tissue",
-                  ]
-                : [
-                    "No masses, calcifications, or distortion",
-                    "Normal breast parenchyma",
-                    "No skin thickening or retraction",
-                    "Negative for malignancy",
-                  ],
-          severity: Math.random() > 0.8 ? "Low suspicion" : Math.random() > 0.5 ? "Normal variant" : "Normal",
-          recommendations:
-            Math.random() > 0.8
-              ? ["Short-term follow-up in 6 months", "Consider breast MRI if high risk", "Continue annual screening"]
-              : Math.random() > 0.5
-                ? [
-                    "Consider supplemental screening (ultrasound/MRI)",
-                    "Annual mammography recommended",
-                    "Discuss with radiologist",
-                  ]
-                : ["Continue annual screening mammography", "Routine breast self-examination"],
-          prescription:
-            Math.random() > 0.8
-              ? {
-                  medications: [
-                    {
-                      name: "Vitamin D3",
-                      dosage: "2000 IU",
-                      frequency: "Once daily",
-                      duration: "Ongoing",
-                      instructions: "Take with a meal containing fat",
-                      timing: "With lunch or dinner",
-                    },
-                  ],
-                  lifestyle: [
-                    "Regular breast self-examination",
-                    "Maintain healthy weight",
-                    "Limit alcohol consumption",
-                    "Regular exercise (150 min/week)",
-                    "Consider genetic counseling if family history",
-                  ],
-                  followUp: "Follow-up mammography in 6 months",
-                  warnings: [
-                    "Report any new breast lumps or changes",
-                    "Perform monthly self-examinations",
-                    "Maintain regular screening schedule",
-                  ],
-                }
-              : Math.random() > 0.5
-                ? {
-                    medications: [],
-                    lifestyle: [
-                      "Monthly breast self-examination",
-                      "Annual clinical breast examination",
-                      "Discuss supplemental screening options",
-                      "Maintain healthy lifestyle",
-                      "Regular exercise and balanced diet",
-                    ],
-                    followUp: "Annual mammography with possible supplemental screening",
-                    warnings: ["Report any breast changes immediately", "Dense tissue may require additional imaging"],
-                  }
-                : {
-                    medications: [],
-                    lifestyle: [
-                      "Continue monthly breast self-examination",
-                      "Maintain healthy diet and exercise",
-                      "Annual mammography screening",
-                      "Limit alcohol consumption",
-                    ],
-                    followUp: "Annual mammography screening",
-                    warnings: [],
-                  },
-        },
-      }
-
-      const result = mockResults[scanType as keyof typeof mockResults] || mockResults["chest-xray"]
-      setAnalysisResult(result)
-      setIsAnalyzing(false)
-
-      toast({
-        title: "Analysis complete!",
-        description: "Your medical image has been successfully analyzed with AI prescription generated.",
-      })
-    }, analysisTime)
+  if (!user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-600"></div>
+      </div>
+    )
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-white">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
       {/* Header */}
-      <header className="bg-white shadow-sm border-b">
+      <header className="bg-white/80 backdrop-blur-sm shadow-sm border-b sticky top-0 z-40">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center space-x-4">
             <Link href="/dashboard">
-              <Button variant="ghost" size="sm">
+              <Button variant="ghost" size="sm" className="hover:bg-blue-50">
                 <ArrowLeft className="h-4 w-4 mr-2" />
                 Back to Dashboard
               </Button>
             </Link>
             <div className="flex items-center space-x-2">
-              <Brain className="h-6 w-6 text-blue-600" />
-              <span className="text-xl font-bold text-gray-900">Upload Medical Image</span>
+              <div className="p-2 bg-blue-100 rounded-lg">
+                <Brain className="h-6 w-6 text-blue-600" />
+              </div>
+              <div>
+                <h1 className="text-xl font-bold text-gray-900">AI Medical Analysis</h1>
+                <p className="text-sm text-gray-600">Upload and analyze medical images</p>
+              </div>
             </div>
           </div>
         </div>
       </header>
 
-      <div className="container mx-auto px-4 py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+      <div className="container mx-auto px-4 py-6 lg:py-8">
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 lg:gap-8">
           {/* Upload Section */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Select Medical Image</CardTitle>
-              <CardDescription>Drag and drop your medical image or click to browse</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div
-                className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-400 transition-colors cursor-pointer"
-                onDrop={handleDrop}
-                onDragOver={handleDragOver}
-                onClick={() => document.getElementById("file-input")?.click()}
-              >
-                <Upload className="h-12 w-12 mx-auto text-gray-400 mb-4" />
-                <div className="space-y-2">
-                  <p className="text-lg font-medium">
-                    {selectedFile ? selectedFile.name : "Drop your medical image here"}
-                  </p>
-                  <p className="text-sm text-gray-500">Supports JPEG, PNG, WebP, DICOM • Max size 50MB</p>
-                </div>
-                <input
-                  id="file-input"
-                  type="file"
-                  accept="image/*,.dcm"
-                  onChange={handleFileSelect}
-                  className="hidden"
-                />
-              </div>
-
-              {selectedFile && (
-                <div className="flex items-center space-x-3 p-3 bg-green-50 rounded-lg">
-                  <FileImage className="h-6 w-6 text-green-600" />
-                  <div className="flex-1">
-                    <p className="font-medium">{selectedFile.name}</p>
-                    <p className="text-sm text-gray-600">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
+          <div className="space-y-6">
+            <Card className="shadow-lg border-0 bg-white/70 backdrop-blur-sm">
+              <CardHeader className="pb-4">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-blue-100 rounded-lg">
+                    <Upload className="h-5 w-5 text-blue-600" />
+                  </div>
+                  <div>
+                    <CardTitle className="text-lg">Select Medical Image</CardTitle>
+                    <CardDescription>Drag and drop your medical image or click to browse</CardDescription>
                   </div>
                 </div>
-              )}
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div
+                  className="border-2 border-dashed border-gray-300 rounded-xl p-6 lg:p-8 text-center hover:border-blue-400 hover:bg-blue-50/50 transition-all duration-200 cursor-pointer group"
+                  onDrop={handleDrop}
+                  onDragOver={handleDragOver}
+                  onClick={() => document.getElementById("file-input")?.click()}
+                >
+                  <div className="space-y-4">
+                    {imagePreview ? (
+                      <div className="space-y-4">
+                        <img
+                          src={imagePreview || "/placeholder.svg"}
+                          alt="Preview"
+                          className="max-w-full max-h-48 mx-auto rounded-lg border shadow-sm"
+                        />
+                        <p className="text-sm text-gray-600">Click to change image</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="mx-auto w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center group-hover:bg-blue-200 transition-colors">
+                          <Upload className="h-8 w-8 text-blue-600" />
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-lg font-medium text-gray-900">Drop your medical image here</p>
+                          <p className="text-sm text-gray-500">Supports JPEG, PNG, WebP, DICOM • Max size 50MB</p>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <input
+                    id="file-input"
+                    type="file"
+                    accept="image/*,.dcm"
+                    onChange={handleFileSelect}
+                    className="hidden"
+                  />
+                </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="scan-type">Scan Type</Label>
-                <Select value={scanType} onValueChange={setScanType}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select the type of medical scan" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="chest-xray">Chest X-Ray</SelectItem>
-                    <SelectItem value="brain-mri">Brain MRI</SelectItem>
-                    <SelectItem value="ct-scan">CT Scan</SelectItem>
-                    <SelectItem value="bone-xray">Bone X-Ray</SelectItem>
-                    <SelectItem value="ultrasound">Ultrasound</SelectItem>
-                    <SelectItem value="mammography">Mammography</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <Button onClick={analyzeImage} disabled={!selectedFile || !scanType || isAnalyzing} className="w-full">
-                {isAnalyzing ? (
-                  <>
-                    <Brain className="h-4 w-4 mr-2 animate-pulse" />
-                    Analyzing...
-                  </>
-                ) : (
-                  <>
-                    <Brain className="h-4 w-4 mr-2" />
-                    Analyze with AI
-                  </>
+                {selectedFile && (
+                  <div className="flex items-center space-x-4 p-4 bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl border border-green-200">
+                    <div className="p-2 bg-green-100 rounded-lg">
+                      <FileImage className="h-6 w-6 text-green-600" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-green-900 truncate">{selectedFile.name}</p>
+                      <p className="text-sm text-green-700">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
+                    </div>
+                    <CheckCircle className="h-6 w-6 text-green-600 flex-shrink-0" />
+                  </div>
                 )}
-              </Button>
 
-              {isAnalyzing && (
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span>AI Analysis Progress</span>
-                    <span>{Math.round(progress)}%</span>
-                  </div>
-                  <Progress value={progress} className="w-full" />
-                  <p className="text-sm text-gray-600 text-center">YOLOv8 model is analyzing your medical image...</p>
+                <div className="space-y-3">
+                  <Label htmlFor="scan-type" className="text-base font-medium">
+                    Scan Type
+                  </Label>
+                  <Select value={scanType} onValueChange={setScanType}>
+                    <SelectTrigger className="h-12 text-base">
+                      <SelectValue placeholder="Select the type of medical scan" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="chest-xray">🫁 Chest X-Ray</SelectItem>
+                      <SelectItem value="brain-mri">🧠 Brain MRI</SelectItem>
+                      <SelectItem value="ct-scan">🔍 CT Scan</SelectItem>
+                      <SelectItem value="bone-xray">🦴 Bone X-Ray</SelectItem>
+                      <SelectItem value="ultrasound">📡 Ultrasound</SelectItem>
+                      <SelectItem value="mammography">🩺 Mammography</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
-              )}
-            </CardContent>
-          </Card>
+
+                <Button
+                  onClick={analyzeImage}
+                  disabled={!selectedFile || !scanType || isAnalyzing}
+                  className="w-full h-12 text-base font-medium bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg"
+                >
+                  {isAnalyzing ? (
+                    <>
+                      <Brain className="h-5 w-5 mr-2 animate-pulse" />
+                      Analyzing with AI...
+                    </>
+                  ) : (
+                    <>
+                      <Brain className="h-5 w-5 mr-2" />
+                      Analyze with AI
+                    </>
+                  )}
+                </Button>
+
+                {isAnalyzing && (
+                  <div className="space-y-4 p-4 bg-blue-50 rounded-xl border border-blue-200">
+                    <div className="flex justify-between items-center">
+                      <span className="font-medium text-blue-900">AI Analysis Progress</span>
+                      <span className="text-blue-700 font-bold">{Math.round(progress)}%</span>
+                    </div>
+                    <Progress value={progress} className="w-full h-3" />
+                    <div className="flex items-center space-x-2 text-blue-700">
+                      <Activity className="h-4 w-4 animate-pulse" />
+                      <p className="text-sm">YOLOv8 model is analyzing your medical image...</p>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
 
           {/* Results Section */}
-          <Card>
-            <CardHeader>
-              <CardTitle>AI Analysis Results</CardTitle>
-              <CardDescription>Detailed analysis from our advanced YOLOv8 medical AI model</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {!analysisResult ? (
-                <div className="text-center py-12 text-gray-500">
-                  <Brain className="h-16 w-16 mx-auto mb-4 opacity-50" />
-                  <p>Upload and analyze an image to see results here</p>
-                </div>
-              ) : (
-                <div className="space-y-6">
-                  {/* Diagnosis */}
-                  <div className="p-4 bg-blue-50 rounded-lg">
-                    <div className="flex items-center space-x-2 mb-2">
-                      <CheckCircle className="h-5 w-5 text-blue-600" />
-                      <h3 className="font-semibold text-blue-900">Diagnosis</h3>
-                    </div>
-                    <p className="text-blue-800">{analysisResult.diagnosis}</p>
-                    <p className="text-sm text-blue-600 mt-1">Confidence: {analysisResult.confidence}%</p>
+          <div className="space-y-6">
+            <Card className="shadow-lg border-0 bg-white/70 backdrop-blur-sm">
+              <CardHeader className="pb-4">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-purple-100 rounded-lg">
+                    <Brain className="h-5 w-5 text-purple-600" />
                   </div>
-
-                  {/* Findings */}
                   <div>
-                    <h3 className="font-semibold mb-3">Key Findings</h3>
-                    <ul className="space-y-2">
-                      {analysisResult.findings.map((finding: string, index: number) => (
-                        <li key={index} className="flex items-start space-x-2">
-                          <CheckCircle className="h-4 w-4 text-green-600 mt-0.5 flex-shrink-0" />
-                          <span className="text-sm">{finding}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-
-                  {/* Severity */}
-                  <div className="p-3 bg-green-50 rounded-lg">
-                    <div className="flex items-center space-x-2">
-                      <CheckCircle className="h-4 w-4 text-green-600" />
-                      <span className="font-medium">Severity: </span>
-                      <span className="text-green-700">{analysisResult.severity}</span>
-                    </div>
-                  </div>
-
-                  {/* Recommendations */}
-                  <div>
-                    <h3 className="font-semibold mb-3">Recommendations</h3>
-                    <ul className="space-y-2">
-                      {analysisResult.recommendations.map((recommendation: string, index: number) => (
-                        <li key={index} className="flex items-start space-x-2">
-                          <AlertCircle className="h-4 w-4 text-orange-600 mt-0.5 flex-shrink-0" />
-                          <span className="text-sm">{recommendation}</span>
-                        </li>
-                      ))}
-                    </ul>
+                    <CardTitle className="text-lg">AI Analysis Results</CardTitle>
+                    <CardDescription>Detailed analysis from our advanced YOLOv8 medical AI model</CardDescription>
                   </div>
                 </div>
-              )}
-            </CardContent>
-          </Card>
+              </CardHeader>
+              <CardContent>
+                {!analysisResult ? (
+                  <div className="text-center py-12 text-gray-500">
+                    <div className="mx-auto w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mb-4">
+                      <Brain className="h-10 w-10 text-gray-400" />
+                    </div>
+                    <p className="text-lg font-medium mb-2">Ready for Analysis</p>
+                    <p className="text-sm">Upload and analyze an image to see results here</p>
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    {/* Diagnosis */}
+                    <div className="p-4 lg:p-6 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border border-blue-200">
+                      <div className="flex items-start space-x-3 mb-3">
+                        <div className="p-1 bg-blue-100 rounded-lg">
+                          <CheckCircle className="h-5 w-5 text-blue-600" />
+                        </div>
+                        <h3 className="font-semibold text-blue-900 text-lg">Primary Diagnosis</h3>
+                      </div>
+                      <p className="text-blue-800 mb-3 leading-relaxed">{analysisResult.diagnosis}</p>
+                      <div className="flex items-center space-x-4 text-sm">
+                        <div className="flex items-center space-x-2">
+                          <Activity className="h-4 w-4 text-blue-600" />
+                          <span className="text-blue-700">
+                            Confidence: <strong>{analysisResult.confidence}%</strong>
+                          </span>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <Shield className="h-4 w-4 text-blue-600" />
+                          <span className="text-blue-700">
+                            Severity: <strong>{analysisResult.severity}</strong>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Findings */}
+                    <div className="space-y-3">
+                      <h3 className="font-semibold text-gray-900 text-lg flex items-center space-x-2">
+                        <CheckCircle className="h-5 w-5 text-green-600" />
+                        <span>Key Clinical Findings</span>
+                      </h3>
+                      <div className="grid gap-3">
+                        {analysisResult.findings.map((finding: string, index: number) => (
+                          <div
+                            key={index}
+                            className="flex items-start space-x-3 p-3 bg-green-50 rounded-lg border border-green-200"
+                          >
+                            <CheckCircle className="h-4 w-4 text-green-600 mt-0.5 flex-shrink-0" />
+                            <span className="text-sm text-green-800 leading-relaxed">{finding}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Recommendations */}
+                    <div className="space-y-3">
+                      <h3 className="font-semibold text-gray-900 text-lg flex items-center space-x-2">
+                        <AlertCircle className="h-5 w-5 text-orange-600" />
+                        <span>Clinical Recommendations</span>
+                      </h3>
+                      <div className="grid gap-3">
+                        {analysisResult.recommendations.map((recommendation: string, index: number) => (
+                          <div
+                            key={index}
+                            className="flex items-start space-x-3 p-3 bg-orange-50 rounded-lg border border-orange-200"
+                          >
+                            <AlertCircle className="h-4 w-4 text-orange-600 mt-0.5 flex-shrink-0" />
+                            <span className="text-sm text-orange-800 leading-relaxed">{recommendation}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         </div>
 
         {/* AI Prescription Section */}
         {analysisResult && analysisResult.prescription && (
           <div className="mt-8">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center space-x-2">
-                  <Pill className="h-6 w-6 text-purple-600" />
-                  <span>AI-Generated Prescription</span>
-                </CardTitle>
-                <CardDescription>
-                  Personalized treatment plan based on AI analysis. Always consult with your healthcare provider.
-                </CardDescription>
+            <Card className="shadow-xl border-0 bg-gradient-to-br from-purple-50 to-pink-50">
+              <CardHeader className="pb-6">
+                <div className="flex items-center space-x-3">
+                  <div className="p-3 bg-purple-100 rounded-xl">
+                    <Pill className="h-6 w-6 text-purple-600" />
+                  </div>
+                  <div>
+                    <CardTitle className="text-xl text-purple-900">AI-Generated Treatment Plan</CardTitle>
+                    <CardDescription className="text-purple-700">
+                      Personalized treatment recommendations based on AI analysis. Always consult with your healthcare
+                      provider.
+                    </CardDescription>
+                  </div>
+                </div>
               </CardHeader>
-              <CardContent className="space-y-6">
+              <CardContent className="space-y-8">
                 {/* Medications */}
                 {analysisResult.prescription.medications.length > 0 && (
-                  <div className="space-y-4">
-                    <h3 className="text-lg font-semibold flex items-center space-x-2">
-                      <Pill className="h-5 w-5 text-purple-600" />
-                      <span>Medications</span>
+                  <div className="space-y-6">
+                    <h3 className="text-xl font-bold text-purple-900 flex items-center space-x-3">
+                      <div className="p-2 bg-purple-100 rounded-lg">
+                        <Pill className="h-5 w-5 text-purple-600" />
+                      </div>
+                      <span>Prescribed Medications</span>
                     </h3>
-                    <div className="grid gap-4">
+                    <div className="grid gap-6">
                       {analysisResult.prescription.medications.map((med: any, index: number) => (
-                        <div key={index} className="border rounded-lg p-4 bg-purple-50">
-                          <div className="flex justify-between items-start mb-3">
-                            <h4 className="font-semibold text-lg text-purple-900">{med.name}</h4>
-                            <span className="bg-purple-100 text-purple-800 px-3 py-1 rounded-full text-sm font-medium">
-                              {med.dosage}
-                            </span>
-                          </div>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                            <div className="flex items-center space-x-2">
-                              <Clock className="h-4 w-4 text-purple-600" />
-                              <span>
-                                <strong>Frequency:</strong> {med.frequency}
-                              </span>
+                        <div key={index} className="bg-white rounded-xl p-6 shadow-lg border border-purple-200">
+                          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between mb-4 space-y-3 lg:space-y-0">
+                            <div>
+                              <h4 className="font-bold text-xl text-purple-900 mb-1">{med.name}</h4>
+                              <p className="text-purple-700 text-sm">Generic and brand name included</p>
                             </div>
-                            <div className="flex items-center space-x-2">
-                              <Calendar className="h-4 w-4 text-purple-600" />
-                              <span>
-                                <strong>Duration:</strong> {med.duration}
+                            <div className="flex flex-wrap gap-2">
+                              <span className="bg-purple-100 text-purple-800 px-4 py-2 rounded-full text-sm font-semibold">
+                                {med.dosage}
                               </span>
-                            </div>
-                            <div className="flex items-center space-x-2">
-                              <Clock className="h-4 w-4 text-purple-600" />
-                              <span>
-                                <strong>Timing:</strong> {med.timing}
+                              <span className="bg-blue-100 text-blue-800 px-4 py-2 rounded-full text-sm font-semibold">
+                                {med.frequency}
                               </span>
                             </div>
                           </div>
-                          <div className="mt-3 p-3 bg-white rounded border-l-4 border-purple-400">
-                            <p className="text-sm text-gray-700">
-                              <strong>Instructions:</strong> {med.instructions}
-                            </p>
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
+                            <div className="flex items-center space-x-3 p-3 bg-purple-50 rounded-lg">
+                              <Clock className="h-5 w-5 text-purple-600" />
+                              <div>
+                                <p className="text-sm font-medium text-purple-900">Timing</p>
+                                <p className="text-sm text-purple-700">{med.timing}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-3 p-3 bg-blue-50 rounded-lg">
+                              <Calendar className="h-5 w-5 text-blue-600" />
+                              <div>
+                                <p className="text-sm font-medium text-blue-900">Duration</p>
+                                <p className="text-sm text-blue-700">{med.duration}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-3 p-3 bg-green-50 rounded-lg md:col-span-2 lg:col-span-1">
+                              <Shield className="h-5 w-5 text-green-600" />
+                              <div>
+                                <p className="text-sm font-medium text-green-900">Safety</p>
+                                <p className="text-sm text-green-700">FDA Approved</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="p-4 bg-gradient-to-r from-yellow-50 to-orange-50 rounded-lg border-l-4 border-orange-400">
+                            <h5 className="font-semibold text-orange-900 mb-2 flex items-center space-x-2">
+                              <AlertCircle className="h-4 w-4" />
+                              <span>Important Instructions</span>
+                            </h5>
+                            <p className="text-sm text-orange-800 leading-relaxed">{med.instructions}</p>
                           </div>
                         </div>
                       ))}
@@ -1014,65 +728,97 @@ export default function UploadPage() {
                 )}
 
                 {/* Lifestyle Recommendations */}
-                <div className="space-y-4">
-                  <h3 className="text-lg font-semibold flex items-center space-x-2">
-                    <CheckCircle className="h-5 w-5 text-green-600" />
+                <div className="space-y-6">
+                  <h3 className="text-xl font-bold text-green-900 flex items-center space-x-3">
+                    <div className="p-2 bg-green-100 rounded-lg">
+                      <CheckCircle className="h-5 w-5 text-green-600" />
+                    </div>
                     <span>Lifestyle Modifications</span>
                   </h3>
-                  <div className="bg-green-50 rounded-lg p-4 border border-green-200">
-                    <ul className="space-y-3">
+                  <div className="bg-white rounded-xl p-6 shadow-lg border border-green-200">
+                    <div className="grid gap-4">
                       {analysisResult.prescription.lifestyle.map((item: string, index: number) => (
-                        <li key={index} className="flex items-start space-x-3">
-                          <CheckCircle className="h-5 w-5 text-green-600 mt-0.5 flex-shrink-0" />
-                          <span className="text-sm text-green-800">{item}</span>
-                        </li>
+                        <div key={index} className="flex items-start space-x-4 p-4 bg-green-50 rounded-lg">
+                          <div className="p-1 bg-green-100 rounded-full">
+                            <CheckCircle className="h-4 w-4 text-green-600" />
+                          </div>
+                          <span className="text-green-800 leading-relaxed">{item}</span>
+                        </div>
                       ))}
-                    </ul>
+                    </div>
                   </div>
                 </div>
 
                 {/* Follow-up Care */}
-                <div className="space-y-4">
-                  <h3 className="text-lg font-semibold flex items-center space-x-2">
-                    <Calendar className="h-5 w-5 text-blue-600" />
-                    <span>Follow-up Care</span>
+                <div className="space-y-6">
+                  <h3 className="text-xl font-bold text-blue-900 flex items-center space-x-3">
+                    <div className="p-2 bg-blue-100 rounded-lg">
+                      <Calendar className="h-5 w-5 text-blue-600" />
+                    </div>
+                    <span>Follow-up Care Plan</span>
                   </h3>
-                  <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
-                    <p className="text-blue-800">{analysisResult.prescription.followUp}</p>
+                  <div className="bg-white rounded-xl p-6 shadow-lg border border-blue-200">
+                    <div className="flex items-start space-x-4">
+                      <div className="p-2 bg-blue-100 rounded-lg">
+                        <Calendar className="h-5 w-5 text-blue-600" />
+                      </div>
+                      <div>
+                        <h4 className="font-semibold text-blue-900 mb-2">Next Steps</h4>
+                        <p className="text-blue-800 leading-relaxed">{analysisResult.prescription.followUp}</p>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
                 {/* Warnings */}
                 {analysisResult.prescription.warnings.length > 0 && (
-                  <div className="space-y-4">
-                    <h3 className="text-lg font-semibold flex items-center space-x-2">
-                      <AlertCircle className="h-5 w-5 text-red-600" />
-                      <span>Important Warnings</span>
+                  <div className="space-y-6">
+                    <h3 className="text-xl font-bold text-red-900 flex items-center space-x-3">
+                      <div className="p-2 bg-red-100 rounded-lg">
+                        <AlertCircle className="h-5 w-5 text-red-600" />
+                      </div>
+                      <span>Important Safety Warnings</span>
                     </h3>
-                    <div className="bg-red-50 rounded-lg p-4 border border-red-200">
-                      <ul className="space-y-2">
+                    <div className="bg-white rounded-xl p-6 shadow-lg border border-red-200">
+                      <div className="grid gap-4">
                         {analysisResult.prescription.warnings.map((warning: string, index: number) => (
-                          <li key={index} className="flex items-start space-x-3">
-                            <AlertCircle className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
-                            <span className="text-sm text-red-800">{warning}</span>
-                          </li>
+                          <div
+                            key={index}
+                            className="flex items-start space-x-4 p-4 bg-red-50 rounded-lg border border-red-200"
+                          >
+                            <div className="p-1 bg-red-100 rounded-full">
+                              <AlertCircle className="h-4 w-4 text-red-600" />
+                            </div>
+                            <span className="text-red-800 leading-relaxed font-medium">{warning}</span>
+                          </div>
                         ))}
-                      </ul>
+                      </div>
                     </div>
                   </div>
                 )}
 
-                {/* Disclaimer */}
-                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                  <div className="flex items-start space-x-3">
-                    <AlertCircle className="h-5 w-5 text-yellow-600 mt-0.5 flex-shrink-0" />
-                    <div className="text-sm text-yellow-800">
-                      <p className="font-semibold mb-1">Important Medical Disclaimer</p>
-                      <p>
-                        This AI-generated prescription is for informational purposes only and should not replace
-                        professional medical advice, diagnosis, or treatment. Always consult with a qualified healthcare
-                        provider before starting, stopping, or changing any medication or treatment plan.
-                      </p>
+                {/* Enhanced Disclaimer */}
+                <div className="bg-gradient-to-r from-yellow-50 to-orange-50 border-2 border-yellow-300 rounded-xl p-6 shadow-lg">
+                  <div className="flex items-start space-x-4">
+                    <div className="p-2 bg-yellow-100 rounded-lg">
+                      <AlertCircle className="h-6 w-6 text-yellow-600" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-yellow-900 mb-3 text-lg">⚠️ Critical Medical Disclaimer</h4>
+                      <div className="space-y-2 text-yellow-800">
+                        <p className="font-semibold">
+                          This AI-generated treatment plan is for informational and educational purposes only.
+                        </p>
+                        <ul className="space-y-1 text-sm list-disc list-inside ml-4">
+                          <li>Always consult with a qualified healthcare provider before starting any medication</li>
+                          <li>
+                            Do not use this as a substitute for professional medical advice, diagnosis, or treatment
+                          </li>
+                          <li>Medication dosages and interactions must be verified by a licensed physician</li>
+                          <li>Seek immediate medical attention for any emergency symptoms</li>
+                          <li>This AI analysis should complement, not replace, clinical judgment</li>
+                        </ul>
+                      </div>
                     </div>
                   </div>
                 </div>

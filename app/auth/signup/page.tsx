@@ -8,10 +8,11 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Brain, Eye, EyeOff } from "lucide-react"
+import { Brain, Eye, EyeOff, Mail, CheckCircle } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useToast } from "@/components/ui/use-toast"
+import { authService } from "@/lib/auth"
 
 export default function SignUp() {
   const [formData, setFormData] = useState({
@@ -24,6 +25,8 @@ export default function SignUp() {
   })
   const [showPassword, setShowPassword] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  const [needsConfirmation, setNeedsConfirmation] = useState(false)
+  const [userEmail, setUserEmail] = useState("")
   const router = useRouter()
   const { toast } = useToast()
 
@@ -56,22 +59,141 @@ export default function SignUp() {
       return
     }
 
-    // Simulate registration
-    setTimeout(() => {
-      localStorage.setItem(
-        "user",
-        JSON.stringify({
-          email: formData.email,
-          name: `${formData.firstName} ${formData.lastName}`,
-        }),
-      )
+    if (formData.password.length < 6) {
       toast({
-        title: "Account created!",
-        description: "Welcome to MediScan AI. You can now start analyzing medical images.",
+        title: "Error",
+        description: "Password must be at least 6 characters long.",
+        variant: "destructive",
       })
-      router.push("/dashboard")
       setIsLoading(false)
-    }, 1000)
+      return
+    }
+
+    try {
+      const result = await authService.signUp({
+        firstName: formData.firstName,
+        lastName: formData.lastName,
+        email: formData.email,
+        password: formData.password,
+      })
+
+      if (result.success) {
+        if (result.needsConfirmation) {
+          // Email confirmation required
+          setUserEmail(formData.email)
+          setNeedsConfirmation(true)
+          toast({
+            title: "Check your email!",
+            description: "We've sent you a confirmation link. Please check your email to complete registration.",
+          })
+        } else if (result.user) {
+          // User can sign in immediately
+          toast({
+            title: "Account created!",
+            description: `Welcome to MediScan AI, ${result.user.name}! You can now start analyzing medical images.`,
+          })
+          setTimeout(() => {
+            router.push("/dashboard")
+          }, 500)
+        }
+      } else {
+        toast({
+          title: "Registration failed",
+          description: result.error || "Failed to create account. Please try again.",
+          variant: "destructive",
+        })
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "An unexpected error occurred. Please try again.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleResendConfirmation = async () => {
+    setIsLoading(true)
+    try {
+      const result = await authService.resendConfirmation(userEmail)
+      if (result.success) {
+        toast({
+          title: "Email sent!",
+          description: "We've sent another confirmation email. Please check your inbox and spam folder.",
+        })
+      } else {
+        toast({
+          title: "Error",
+          description: result.error || "Failed to resend confirmation email.",
+          variant: "destructive",
+        })
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to resend confirmation email.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  if (needsConfirmation) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-white flex items-center justify-center p-4">
+        <Card className="w-full max-w-md">
+          <CardHeader className="text-center">
+            <div className="flex items-center justify-center space-x-2 mb-4">
+              <div className="p-3 bg-green-100 rounded-full">
+                <Mail className="h-8 w-8 text-green-600" />
+              </div>
+            </div>
+            <CardTitle className="text-green-900">Check Your Email</CardTitle>
+            <CardDescription>
+              We've sent a confirmation link to <strong>{userEmail}</strong>
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="p-4 bg-green-50 rounded-lg border border-green-200">
+              <div className="flex items-start space-x-3">
+                <CheckCircle className="h-5 w-5 text-green-600 mt-0.5" />
+                <div className="space-y-2">
+                  <p className="text-sm text-green-800 font-medium">Next Steps:</p>
+                  <ol className="text-sm text-green-700 space-y-1 list-decimal list-inside ml-2">
+                    <li>Check your email inbox</li>
+                    <li>Look for an email from MediScan AI</li>
+                    <li>Click the confirmation link</li>
+                    <li>Return here to sign in</li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+
+            <div className="text-center">
+              <p className="text-sm text-gray-600 mb-3">
+                Don't see the email? Check your spam folder or request a new one.
+              </p>
+              <Button variant="outline" onClick={handleResendConfirmation} disabled={isLoading} className="w-full">
+                {isLoading ? "Sending..." : "Resend Confirmation Email"}
+              </Button>
+            </div>
+          </CardContent>
+          <CardFooter className="flex flex-col space-y-4">
+            <div className="text-center text-sm">
+              <Link href="/auth/signin" className="text-blue-600 hover:underline">
+                Already confirmed? Sign in
+              </Link>
+            </div>
+            <Link href="/" className="text-center text-sm text-gray-600 hover:underline">
+              Back to Home
+            </Link>
+          </CardFooter>
+        </Card>
+      </div>
+    )
   }
 
   return (
